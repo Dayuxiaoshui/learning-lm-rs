@@ -1,3 +1,5 @@
+use std::{borrow::BorrowMut, f32::consts::SQRT_2};
+
 use crate::tensor::Tensor;
 
 // get (row) vectors from a 2D table given a list of indices
@@ -71,98 +73,92 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-  
-    let x_shape = x.shape();
-    let y_shape = y.shape();
-    let w_shape = w.shape();
-
-    // 确保 x 和 y 具有相同的形状
-    assert_eq!(x_shape, y_shape, "x and y must have the same shape");
-    assert_eq!(x_shape[1], w_shape[0], "w must have the same length as the second dimension of x");
-
-    // 获取内部数据的可变引用
-    let x_data = x.data();
-    let y_data = unsafe { y.data_mut() };
-    let w_data = w.data();
-
-    // 遍历每一行
-    for i in 0..x_shape[0] {
-        // 计算该行的平方和
-        let mut sum_squares = 0.0;
-        for j in 0..x_shape[1] {
-            sum_squares += x_data[i * x_shape[1] + j].powi(2);
-        }
-        let rms = (sum_squares / x_shape[1] as f32 + epsilon).sqrt();
-
-        // 对该行的每个元素进行归一化
-        for j in 0..x_shape[1] {
-            y_data[i * x_shape[1] + j] = (w_data[j] * x_data[i * x_shape[1] + j]) / rms;
+    assert!(y.size() == x.size());
+    // 获取维度数
+    let ndim = y.shape().len();
+    // 确保至少有2个维度
+    assert!(ndim >= 2);
+    // 序列的数量
+    let seq_len = y.shape()[ndim - 2];
+    // 每个序列的长度
+    let total_seq_len = y.shape()[ndim - 1];
+    // 获取维度数
+    let wdim = w.shape().len();
+    // 确保只有1个维度
+    assert!(wdim == 1);
+    // 确保长度相同
+    assert!(w.size() == total_seq_len);
+    // 批次数量
+    let batch = y.size() / (seq_len * total_seq_len);
+    // 获取数据的引用
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
+    let _w = w.data();
+    // 遍历每个批次
+    for b in 0..batch {
+        // 当前批次的基索引
+        let base = b * seq_len * total_seq_len;
+        // 遍历批次中的每个序列
+        for l in 0..seq_len {
+            // 当前序列的偏移量
+            let offset = base + l * total_seq_len;
+            // 平方和
+            let s: f32 = _x[offset..offset + total_seq_len]
+                .iter()
+                .map(|f| f * f)
+                .sum();
+            let sqrt = (s / total_seq_len as f32 + epsilon).sqrt();
+            // 计算并储存结果
+            for i in 0..total_seq_len {
+                _y[offset + i] = _w[i] * _x[offset + i] / sqrt;
+            }
         }
     }
 }
 
+// y = sigmoid(x) * x * y
+// hint: this is an element-wise operation
 pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
     let len = y.size();
     assert!(len == x.size());
 
-    let _y = unsafe { y.data_mut() };
-    let _x = x.data();
-
-    for i in 0..len {
-        let sigmoid_x = 1.0 / (1.0 + (-_x[i]).exp());
-        _y[i] = _x[i] * sigmoid_x * _y[i];
+    let y_data = unsafe { y.data_mut() };
+    let x_data = x.data();
+    for i in 0..x_data.len()  {
+        y_data[i]=y_data[i] *x_data[i]/ (1.0 + (-x_data[i]).exp())
     }
 }
-
 
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    let a_shape = a.shape();
-    let b_shape = b.shape();
-    let c_shape = c.shape().clone(); // 克隆 c 的形状以避免不可变借用
+    // 获取 A、B 和 C 的形状
+    let (m, k) = (a.shape()[0], a.shape()[1]);
+    let (n, k_b) = (b.shape()[0], b.shape()[1]);
+    let (m_c, n_c) = (c.shape()[0], c.shape()[1]);
 
-    // 确保维度兼容
-    assert_eq!(a_shape[1], b_shape[1], "内层维度必须匹配");
-    assert_eq!(c_shape[0], a_shape[0], "输出矩阵的行维度必须与A匹配");
-    assert_eq!(c_shape[1], b_shape[0], "输出矩阵的列维度必须与B的转置匹配");
+    // 检查 A、B 和 C 的形状是否匹配
+    assert_eq!(k, k_b, "A 的列数必须等于 B 的列数");
+    assert_eq!(m, m_c, "A 的行数必须等于 C 的行数");
+    assert_eq!(n, n_c, "B 的行数必须等于 C 的列数");
 
-    // 获取内部数据的引用
+    // 获取 A、B 和 C 的数据切片
     let a_data = a.data();
     let b_data = b.data();
-    let c_data_clone = c.data().clone(); // 克隆 c 的数据以避免同时可变和不可变借用
+    let c_data = unsafe { c.data_mut() };
 
-    // 执行矩阵乘法，B 矩阵进行转置
-    let mut result_data = vec![0.0; c_data_clone.len()]; // 用于存储计算结果的临时数组
-
-    for i in 0..c_shape[0] {
-        for j in 0..c_shape[1] {
+    // 遍历 C 的每一个元素，计算结果
+    for i in 0..m {
+        for j in 0..n {
             let mut sum = 0.0;
-            for k in 0..a_shape[1] {
-                sum += a_data[i * a_shape[1] + k] * b_data[j * b_shape[1] + k];
+            for p in 0..k {
+                sum += a_data[i * k + p] * b_data[j * k + p];
             }
-            // 计算结果存储在临时数组中
-            result_data[i * c_shape[1] + j] = alpha * sum + beta * c_data_clone[i * c_shape[1] + j];
+            // 计算 C[i, j] = alpha * sum + beta * C[i, j]
+            c_data[i * n + j] = alpha * sum + beta * c_data[i * n + j];
         }
     }
-
-    // 将计算结果写回 c
-    let c_data = unsafe { c.data_mut() }; // 获取 c 的可变引用
-    c_data.copy_from_slice(&result_data);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Dot product of two tensors (treated as vectors)
 #[allow(unused)]
@@ -281,4 +277,3 @@ fn test_matmul_transb() {
         1e-3
     ));
 }
-
