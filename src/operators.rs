@@ -1,5 +1,3 @@
-use std::{borrow::BorrowMut, f32::consts::SQRT_2};
-
 use crate::tensor::Tensor;
 
 // get (row) vectors from a 2D table given a list of indices
@@ -74,46 +72,47 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
     assert!(y.size() == x.size());
-    // 获取维度数
+
+    // 至少有两个维度
     let ndim = y.shape().len();
-    // 确保至少有2个维度
     assert!(ndim >= 2);
-    // 序列的数量
-    let seq_len = y.shape()[ndim - 2];
-    // 每个序列的长度
-    let total_seq_len = y.shape()[ndim - 1];
-    // 获取维度数
-    let wdim = w.shape().len();
-    // 确保只有1个维度
-    assert!(wdim == 1);
-    // 确保长度相同
-    assert!(w.size() == total_seq_len);
-    // 批次数量
-    let batch = y.size() / (seq_len * total_seq_len);
-    // 获取数据的引用
+
+    // w 是个一维向量
+    let w_dim = w.shape().len();
+    assert!(w_dim == 1);
+
+    let row = y.shape()[ndim - 2];
+    let col = y.shape()[ndim - 1];
+
+    // 确保 x 与 w 维度相同
+    assert!(w.size() == col);
+
     let _y = unsafe { y.data_mut() };
     let _x = x.data();
     let _w = w.data();
-    // 遍历每个批次
-    for b in 0..batch {
-        // 当前批次的基索引
-        let base = b * seq_len * total_seq_len;
-        // 遍历批次中的每个序列
-        for l in 0..seq_len {
-            // 当前序列的偏移量
-            let offset = base + l * total_seq_len;
-            // 平方和
-            let s: f32 = _x[offset..offset + total_seq_len]
-                .iter()
-                .map(|f| f * f)
-                .sum();
-            let sqrt = (s / total_seq_len as f32 + epsilon).sqrt();
-            // 计算并储存结果
-            for i in 0..total_seq_len {
-                _y[offset + i] = _w[i] * _x[offset + i] / sqrt;
-            }
+
+    for i in 0..row {
+        let start = i * col;
+        let end = start + col;
+
+        let mut sum_squares = 0.0;
+
+        for j in start..end {
+            sum_squares += _x[j].powi(2);
+        }
+
+        let var = (sum_squares / col as f32 + epsilon).sqrt();
+
+        for k in 0..col {
+            let index = start + k;
+            _y[index] = _x[index] * _w[k] / var;
         }
     }
+}
+
+// sigmoid
+pub fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }
 
 // y = sigmoid(x) * x * y
@@ -122,41 +121,76 @@ pub fn silu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
     let len = y.size();
     assert!(len == x.size());
 
-    let y_data = unsafe { y.data_mut() };
-    let x_data = x.data();
-    for i in 0..x_data.len()  {
-        y_data[i]=y_data[i] *x_data[i]/ (1.0 + (-x_data[i]).exp())
+    let _x = x.data();
+    let _y = unsafe { y.data_mut() };
+
+    for i in 0..len {
+        _y[i] = _x[i] * sigmoid(_x[i]) * _y[i];
     }
 }
 
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    // 获取 A、B 和 C 的形状
-    let (m, k) = (a.shape()[0], a.shape()[1]);
-    let (n, k_b) = (b.shape()[0], b.shape()[1]);
-    let (m_c, n_c) = (c.shape()[0], c.shape()[1]);
+    let a_dim = a.shape().len();
+    let a_row = a.shape()[a_dim - 2];
+    let a_col = a.shape()[a_dim - 1];
 
-    // 检查 A、B 和 C 的形状是否匹配
-    assert_eq!(k, k_b, "A 的列数必须等于 B 的列数");
-    assert_eq!(m, m_c, "A 的行数必须等于 C 的行数");
-    assert_eq!(n, n_c, "B 的行数必须等于 C 的列数");
+    let b_dim = b.shape().len();
+    let b_row = b.shape()[b_dim - 2];
+    let b_col = b.shape()[b_dim - 1];
 
-    // 获取 A、B 和 C 的数据切片
-    let a_data = a.data();
-    let b_data = b.data();
-    let c_data = unsafe { c.data_mut() };
+    let len = c.size();
 
-    // 遍历 C 的每一个元素，计算结果
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0;
-            for p in 0..k {
-                sum += a_data[i * k + p] * b_data[j * k + p];
-            }
-            // 计算 C[i, j] = alpha * sum + beta * C[i, j]
-            c_data[i * n + j] = alpha * sum + beta * c_data[i * n + j];
+    let _c = unsafe { c.data_mut() };
+    let _a = a.data();
+    let _b = b.data();
+
+    // 暂时只考虑二维
+    assert!(a_col == b_col);
+
+    // for i in 0..a_row {
+    //     for j in 0..b_row {
+    //         let mut sum = 0.0;
+    //         for k in 0..a_col {
+    //             sum += _a[i * a_col + k] * _b[j * b_col + k];
+    //         }
+    //         _c[i * a_row + j] = alpha * sum + beta * _c[i * a_row + j];
+    //     }
+    // }
+
+    let mut n_ab: Vec<f32> = Vec::new();
+
+    for i in 0..a_row {
+        let start = i * &a_col;
+        for j in 0..b_row {
+            let sta = j * &b_col;
+            let n_m: Vec<_> = _a[start..(start + &a_col)]
+                .iter()
+                .zip(_b[sta..(sta + &a_col)].iter())
+                .map(|(a, b)| a * b)
+                .collect();
+            let n_sum = n_m.iter().sum::<f32>() * alpha;
+            n_ab.push(n_sum);
         }
+    }
+
+    for i in 0..len {
+        _c[i] = _c[i] * beta + n_ab[i];
+    }
+}
+
+// 矩阵 a + b
+pub fn add(y: &mut Tensor<f32>, x: &Tensor<f32>) {
+    assert!(x.shape() == y.shape());
+
+    let len = y.size();
+
+    let _x = x.data();
+    let _y = unsafe { y.data_mut() };
+
+    for i in 0..len {
+        _y[i] = _x[i] + _y[i];
     }
 }
 
